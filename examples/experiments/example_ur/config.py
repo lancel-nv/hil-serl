@@ -86,12 +86,17 @@ class TrainConfig(DefaultTrainingConfig):
         env = Quat2EulerWrapper(env)
         env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)
         env = ChunkingWrapper(env, obs_horizon=1, act_exec_horizon=None)
-        if classifier:
+        # The training scripts (record_demos.py, train_bc.py, train_rlpd.py) all pass
+        # classifier=True unconditionally. For this reach task we use the pose-based
+        # binary reward built into UREnv.compute_reward, so we only wrap in the
+        # vision classifier when a trained checkpoint actually exists.
+        classifier_ckpt = os.path.abspath("classifier_ckpt/")
+        if classifier and os.path.isdir(classifier_ckpt) and os.listdir(classifier_ckpt):
             classifier_fn = load_classifier_func(
                 key=jax.random.PRNGKey(0),
                 sample=env.observation_space.sample(),
                 image_keys=self.classifier_keys,
-                checkpoint_path=os.path.abspath("classifier_ckpt/"),
+                checkpoint_path=classifier_ckpt,
             )
 
             def reward_func(obs):
@@ -99,4 +104,7 @@ class TrainConfig(DefaultTrainingConfig):
                 return int(sigmoid(classifier_fn(obs)) > 0.85)
 
             env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
+        elif classifier:
+            print("[example_ur] classifier=True but no classifier_ckpt/ found; "
+                  "falling back to pose-based binary reward (REWARD_THRESHOLD).")
         return env
