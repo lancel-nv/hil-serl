@@ -18,7 +18,7 @@ class OrbbecCapture:
         self,
         name: str,
         serial_number: str | None = None,
-        dim: tuple[int, int] = (1280, 720),
+        dim: tuple[int, int] = (640, 360),
         fps: int = 30,
         exposure: int | None = None,
     ):
@@ -28,6 +28,8 @@ class OrbbecCapture:
                 Config,
                 OBSensorType,
                 OBFormat,
+                OBConvertFormat,
+                FormatConvertFilter,
                 Context,
                 OBLogLevel,
             )
@@ -43,6 +45,8 @@ class OrbbecCapture:
         self.name = name
         self.dim = dim
         self._OBFormat = OBFormat  # stash for _frame_to_bgr
+        self._OBConvertFormat = OBConvertFormat
+        self._FormatConvertFilter = FormatConvertFilter
 
         self.pipeline = Pipeline()
         config = Config()
@@ -62,7 +66,10 @@ class OrbbecCapture:
         try:
             color_profile = profile_list.get_video_stream_profile(dim[0], dim[1], OBFormat.MJPG, fps)
         except Exception:
-            color_profile = profile_list.get_default_video_stream_profile()
+            try:
+                color_profile = profile_list.get_video_stream_profile(dim[0], dim[1], OBFormat.RGB, fps)
+            except Exception:
+                color_profile = profile_list.get_default_video_stream_profile()
 
         config.enable_stream(color_profile)
         self.pipeline.start(config)
@@ -77,8 +84,8 @@ class OrbbecCapture:
         # Warm-up — first few frames after pipeline.start may be empty.
         for _ in range(5):
             try:
-                f = self.pipeline.wait_for_frames(200)
-                if f is not None:
+                f = self.pipeline.wait_for_frames(500)
+                if f is not None and f.get_color_frame() is not None:
                     break
             except Exception:
                 pass
@@ -99,7 +106,14 @@ class OrbbecCapture:
             image = np.resize(data, (height, width, 2))
             image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_YUYV)
         elif fmt == OBFormat.MJPG:
-            image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            convert_filter = self._FormatConvertFilter()
+            convert_filter.set_format_convert_format(self._OBConvertFormat.MJPG_TO_RGB888)
+            rgb_frame = convert_filter.process(frame)
+            if rgb_frame is None:
+                return None
+            rgb_data = np.asanyarray(rgb_frame.get_data())
+            image = np.resize(rgb_data, (height, width, 3))
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
         elif fmt == OBFormat.UYVY:
             image = np.resize(data, (height, width, 2))
             image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_UYVY)
@@ -115,7 +129,7 @@ class OrbbecCapture:
 
     def read(self):
         try:
-            frames = self.pipeline.wait_for_frames(100)
+            frames = self.pipeline.wait_for_frames(500)
             if frames is None:
                 return False, None
             color_frame = frames.get_color_frame()

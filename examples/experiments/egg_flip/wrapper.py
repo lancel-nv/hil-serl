@@ -6,6 +6,7 @@ import numpy as np
 from franka_env.spacemouse.spacemouse_expert import SpaceMouseExpert
 import time
 
+
 class EggClassifierWrapper(gym.Wrapper):
     def __init__(self, env: gym.Env, reward_classifier_func: callable, confidence_threshold: float = 0.9):
         super().__init__(env)
@@ -79,7 +80,7 @@ class EggFlipSpacemouseIntervention(gym.ActionWrapper):
         expert_a, buttons = self.expert.get_action()
         expert_a = np.array([expert_a[0], expert_a[2], expert_a[4]])
         
-        self.left, self.right = tuple(buttons)
+        self.left, self.right = buttons[0], buttons[1]
 
         if np.linalg.norm(expert_a) > 0.001:
             self.last_intervene = time.time()

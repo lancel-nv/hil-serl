@@ -37,7 +37,7 @@ class EnvConfig(DefaultEnvConfig):
     CAMERAS = {
         "wrist": {
             "type": "orbbec",
-            "dim": (1280, 720),
+            "dim": (640, 360),
             # "serial_number": "<your-orbbec-serial>",  # optional when only one Orbbec is attached
         },
     }

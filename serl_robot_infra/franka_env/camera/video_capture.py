@@ -11,7 +11,7 @@ class VideoCapture:
         self.q = queue.Queue()
         self.cap = cap
         self.t = threading.Thread(target=self._reader)
-        self.t.daemon = False
+        self.t.daemon = True
         self.enable = True
         self.t.start()
 
@@ -19,7 +19,8 @@ class VideoCapture:
         while self.enable:
             ret, frame = self.cap.read()
             if not ret:
-                break
+                time.sleep(0.01)
+                continue
             if not self.q.empty():
                 try:
                     self.q.get_nowait()  # discard previous (unprocessed) frame
@@ -33,5 +34,5 @@ class VideoCapture:
 
     def close(self):
         self.enable = False
-        self.t.join()
+        self.t.join(timeout=2.0)
         self.cap.close()

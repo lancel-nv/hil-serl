@@ -292,9 +292,7 @@ class UREnv(gym.Env):
                 display_images[key + "_full"] = cropped_rgb
                 full_res_images[key] = copy.deepcopy(cropped_rgb)
             except queue.Empty:
-                input(
-                    f"{key} camera frozen. Check connect, then press enter to relaunch..."
-                )
+                print(f"{key} camera frozen. Relaunching camera capture...")
                 cap.close()
                 self.init_cameras(self.config.CAMERAS)
                 return self.get_im()

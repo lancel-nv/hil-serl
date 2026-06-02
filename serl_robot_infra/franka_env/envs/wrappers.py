@@ -12,6 +12,7 @@ from typing import List
 
 sigmoid = lambda x: 1 / (1 + np.exp(-x))
 
+
 class HumanClassifierWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
@@ -224,7 +225,8 @@ class SpacemouseIntervention(gym.ActionWrapper):
         - action: spacemouse action if nonezero; else, policy action
         """
         expert_a, buttons = self.expert.get_action()
-        self.left, self.right = tuple(buttons)
+        expert_a = expert_a[:6]
+        self.left, self.right = buttons[0], buttons[1]
         intervened = False
         
         if np.linalg.norm(expert_a) > 0.001:
@@ -262,6 +264,10 @@ class SpacemouseIntervention(gym.ActionWrapper):
         info["right"] = self.right
         return obs, rew, done, truncated, info
 
+    def close(self):
+        self.expert.close()
+        return self.env.close()
+
 class DualSpacemouseIntervention(gym.ActionWrapper):
     def __init__(self, env, action_indices=None, gripper_enabled=True):
         super().__init__(env)
@@ -281,7 +287,8 @@ class DualSpacemouseIntervention(gym.ActionWrapper):
         """
         intervened = False
         expert_a, buttons = self.expert.get_action()
-        self.left1, self.left2, self.right1, self.right2 = tuple(buttons)
+        expert_a = expert_a[:12]
+        self.left1, self.left2, self.right1, self.right2 = buttons[:4]
 
 
         if self.gripper_enabled:
@@ -334,6 +341,10 @@ class DualSpacemouseIntervention(gym.ActionWrapper):
     
     def reset(self, **kwargs):
         return self.env.reset(**kwargs)
+
+    def close(self):
+        self.expert.close()
+        return self.env.close()
 
 
 class GripperPenaltyWrapper(gym.RewardWrapper):
