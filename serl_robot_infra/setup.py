@@ -18,5 +18,6 @@ setup(
         "requests",
         "flask",
         "defusedxml",
+        "ur-rtde",
     ],
 )
