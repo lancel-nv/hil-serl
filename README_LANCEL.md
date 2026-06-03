@@ -86,6 +86,14 @@ python tests/test_ur_server_routes.py --url=http://127.0.0.1:5000/
 python tests/test_ur_roundtrip.py --url=http://127.0.0.1:5000/
 # 期待：RESULT: PASS
 # 这个没过 → 不要往下走，控制层有问题
+
+# 6. 测试键盘控制 ur 机械臂
+# 窗口 1：
+cd /home/lancel/hil-serl/serl_robot_infra/robot_servers
+./launch_ur_server.sh
+# 窗口 2：
+cd /home/lancel/hil-serl
+python serl_robot_infra/tests/test_arm.py
 ```
 
 **判断标准**：上面 6 步**全部 PASS**。任何一步 fail：先回去解决，再前进。每个 stage fail 的原因排查在 `serl_robot_infra/tests/README.md` 里。
@@ -137,12 +145,25 @@ ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.03, 0.03, 0.08, 0.1, 0.1, 0.2])
 
 ## 阶段 E：录 demo（人类用 SpaceMouse 教 5-10 条成功轨迹）
 
+terminal 1:
 ```bash
-cd /media/data/Projects/2024-05-21-Robotics/RL/hil-serl
+conda activate hilserl
+cd /home/lancel/hil-serl/serl_robot_infra/robot_servers
+bash launch_ur_server.sh
+```
+
+terminal 2
+
+```bash
+conda activate hilserl
+cd /home/lancel/hil-serl
 python examples/record_demos.py --exp_name example_ur --successes_needed 5
+
 ```
 
 会发生的事：
+
+**目前有bug： orbbec 是黑色的，spacemouse无响应**
 
 1. 弹出图像窗口（Orbbec 视图，已 resize 到 128×128 拼接）
 2. 机械臂 reset 到 RESET_POSE，然后**停在那等你动 SpaceMouse**

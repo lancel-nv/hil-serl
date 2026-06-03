@@ -268,6 +268,43 @@ class SpacemouseIntervention(gym.ActionWrapper):
         self.expert.close()
         return self.env.close()
 
+
+class KeyboardIntervention(SpacemouseIntervention):
+    def __init__(self, env, action_indices=None, translation_step=1.0):
+        from franka_env.spacemouse.keyboard_expert import KeyboardExpert
+
+        gym.ActionWrapper.__init__(self, env)
+
+        self.gripper_enabled = True
+        if self.action_space.shape == (6,):
+            self.gripper_enabled = False
+
+        self.expert = KeyboardExpert(translation_step=translation_step)
+        self.left, self.right = False, False
+        self.action_indices = action_indices
+        self._last_debug_print = 0.0
+
+    def step(self, action):
+        new_action, replaced = self.action(action)
+
+        obs, rew, done, truncated, info = self.env.step(new_action)
+        if replaced:
+            info["intervene_action"] = new_action
+            now = time.time()
+            if now - self._last_debug_print > 0.5:
+                self._last_debug_print = now
+                tcp_xyz = obs["state"]["tcp_pose"][:3]
+                print(
+                    "[KeyboardIntervention] "
+                    f"xyz_action={np.round(new_action[:3], 3).tolist()} "
+                    f"tcp_xyz={np.round(tcp_xyz, 4).tolist()}",
+                    flush=True,
+                )
+        info["left"] = self.left
+        info["right"] = self.right
+        return obs, rew, done, truncated, info
+
+
 class DualSpacemouseIntervention(gym.ActionWrapper):
     def __init__(self, env, action_indices=None, gripper_enabled=True):
         super().__init__(env)

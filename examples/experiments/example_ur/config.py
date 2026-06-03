@@ -2,12 +2,12 @@
 
 A non-contact "reach a fixed pose" task — intentionally simple so the user can
 verify the UR + Robotiq integration end-to-end (server boot, env reset,
-SpaceMouse teleop, demo recording) without depending on a physical fixture.
+keyboard teleop, demo recording) without depending on a physical fixture.
 
 Before running:
 1. Start ur_server.py against the UR.
 2. Calibrate TARGET_POSE / RESET_POSE for your workspace by driving the arm
-   to the desired pose with SpaceMouse and reading /getpos_euler.
+   to the desired pose with keyboard teleop and reading /getpos_euler.
 3. Replace the camera serial numbers below with the ones for your setup.
 """
 import os
@@ -19,9 +19,9 @@ import numpy as np
 from franka_env.envs.relative_env import RelativeFrame
 from franka_env.envs.wrappers import (
     GripperCloseEnv,
+    KeyboardIntervention,
     MultiCameraBinaryRewardClassifierWrapper,
     Quat2EulerWrapper,
-    SpacemouseIntervention,
 )
 from serl_launcher.networks.reward_classifier import load_classifier_func
 from serl_launcher.wrappers.chunking import ChunkingWrapper
@@ -81,7 +81,7 @@ class TrainConfig(DefaultTrainingConfig):
         env = URExampleEnv(fake_env=fake_env, save_video=save_video, config=EnvConfig())
         env = GripperCloseEnv(env)
         if not fake_env:
-            env = SpacemouseIntervention(env)
+            env = KeyboardIntervention(env)
         env = RelativeFrame(env)
         env = Quat2EulerWrapper(env)
         env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)

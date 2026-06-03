@@ -220,6 +220,20 @@ class URServer:
                 self.servo_gain,
             )
 
+    def speed(self, velocity, acceleration=0.5, time_s=0.016):
+        """Cartesian velocity command [vx, vy, vz, wx, wy, wz] via RTDE speedL."""
+        velocity = np.asarray(velocity, dtype=np.float64)
+        if velocity.shape != (6,):
+            raise ValueError(f"/speedl expects a 6-vector, got shape {velocity.shape}")
+        self.rtde_c.speedL(
+            [float(v) for v in velocity],
+            float(acceleration),
+            float(time_s),
+        )
+
+    def speed_stop(self, acceleration=0.5):
+        self.rtde_c.speedStop(float(acceleration))
+
     def _stop_motion(self):
         """Best-effort stop matching the active control mode. Exceptions are
         swallowed so this is cheap to call before mode transitions or shutdown."""
@@ -248,13 +262,13 @@ class URServer:
         return False
 
     def clear(self):
-        """`/clearerr` analog. UR has no Franka-style error recovery message; we
-        try to re-upload the RTDE control script (recovers from protective stop)
-        and swallow exceptions so this stays cheap to call before every /pose."""
-        try:
-            self.rtde_c.reuploadScript()
-        except Exception:
-            pass
+        """`/clearerr` analog.
+
+        FrankaEnv calls this before every pose command. Re-uploading the UR RTDE
+        control script at control-loop rate interrupts motion, so this route must
+        stay cheap and side-effect free during normal teleop.
+        """
+        return
 
     def set_payload(self, mass, cog):
         try:
@@ -430,6 +444,22 @@ def main(_):
         pose_arr = np.array(request.json["arr"])
         robot_server.move(pose_arr)
         return "Moved"
+
+    @webapp.route("/speedl", methods=["POST"])
+    def speedl():
+        data = request.json or {}
+        robot_server.speed(
+            data["velocity"],
+            acceleration=data.get("acceleration", 0.5),
+            time_s=data.get("time", 0.016),
+        )
+        return "SpeedL"
+
+    @webapp.route("/speedstop", methods=["POST"])
+    def speed_stop():
+        data = request.json or {}
+        robot_server.speed_stop(acceleration=data.get("acceleration", 0.5))
+        return "SpeedStop"
 
     @webapp.route("/getstate", methods=["POST"])
     def get_state():
