@@ -312,6 +312,26 @@ class KeyboardIntervention(SpacemouseIntervention):
         self.velocity_speed_scale = velocity_speed_scale
         self.velocity_acceleration = velocity_acceleration
         self._velocity_active = False
+        self._require_key_release_after_reset = False
+        self._reset_gate_reported = False
+
+    def action(self, action: np.ndarray) -> np.ndarray:
+        # After reset, require all currently pressed keys to be released once.
+        # This prevents a held key from immediately re-triggering speedL right
+        # after reset completion and destabilizing the reset-transition.
+        if self._require_key_release_after_reset and hasattr(self.expert, "has_pressed_keys"):
+            if self.expert.has_pressed_keys():
+                if not self._reset_gate_reported:
+                    print(
+                        "[KeyboardIntervention] reset gate active: release all keys to re-enable teleop.",
+                        flush=True,
+                    )
+                    self._reset_gate_reported = True
+                return action, False
+            self._require_key_release_after_reset = False
+            self._reset_gate_reported = False
+            print("[KeyboardIntervention] reset gate cleared.", flush=True)
+        return super().action(action)
 
     def step(self, action):
         new_action, replaced = self.action(action)
@@ -353,6 +373,19 @@ class KeyboardIntervention(SpacemouseIntervention):
             self.env.velocity_stop(acceleration=self.velocity_acceleration)
             self._velocity_active = False
         return super().close()
+
+    def reset(self, **kwargs):
+        # If an episode ends while keyboard velocity teleop is active, there may
+        # be no subsequent non-intervened step to call velocity_stop().
+        # Stop velocity control explicitly before delegating to env.reset().
+        if self._velocity_active and hasattr(self.env, "velocity_stop"):
+            self.env.velocity_stop(acceleration=self.velocity_acceleration)
+            self._velocity_active = False
+        obs, info = self.env.reset(**kwargs)
+        # Engage key-release gate: user must release held keys before teleop resumes.
+        self._require_key_release_after_reset = True
+        self._reset_gate_reported = False
+        return obs, info
 
 
 class DualSpacemouseIntervention(gym.ActionWrapper):

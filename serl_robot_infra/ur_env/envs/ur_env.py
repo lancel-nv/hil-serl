@@ -364,10 +364,84 @@ class UREnv(gym.Env):
         self.nextpos = p
         self._update_currpos()
 
+    def movel_blocking_move(
+        self,
+        goal: np.ndarray,
+        timeout: float = 5.0,
+        position_tolerance: float = 0.005,
+        orientation_tolerance: float = 0.08,
+    ) -> bool:
+        """Send one /pose command and block until the robot reaches the target.
+
+        This is designed for UR server `/pose` with `movel` mode, where the HTTP
+        request returns immediately while motion continues asynchronously.
+        """
+        goal = np.asarray(goal, dtype=np.float64)
+        if goal.shape == (6,):
+            goal = np.concatenate([goal[:3], euler_2_quat(goal[3:])])
+        if goal.shape != (7,):
+            raise ValueError(f"Expected goal shape (6,) or (7,), got {goal.shape}")
+
+        self._send_pos_command(goal)
+        deadline = time.time() + timeout
+        reached = False
+        last_progress_print = 0.0
+        print_interval = 0.2
+
+        while time.time() < deadline:
+            self._update_currpos()
+            pos_delta = goal[:3] - self.currpos[:3]
+            pos_err = np.linalg.norm(pos_delta)
+
+            curr_quat = self.currpos[3:]
+            goal_quat = goal[3:]
+            curr_quat = curr_quat / max(np.linalg.norm(curr_quat), 1e-9)
+            goal_quat = goal_quat / max(np.linalg.norm(goal_quat), 1e-9)
+            quat_dot = float(np.clip(np.abs(np.dot(curr_quat, goal_quat)), -1.0, 1.0))
+            rot_err = 2.0 * np.arccos(quat_dot)
+
+            now = time.time()
+            if now - last_progress_print >= print_interval:
+                print(
+                    (
+                        "\r[UREnv] moving to reset: "
+                        f"dist={pos_err:.4f}m "
+                        f"dx={pos_delta[0]:+.4f} "
+                        f"dy={pos_delta[1]:+.4f} "
+                        f"dz={pos_delta[2]:+.4f} "
+                        f"rot={rot_err:.3f}rad"
+                    ),
+                    end="",
+                    flush=True,
+                )
+                last_progress_print = now
+
+            if pos_err <= position_tolerance and rot_err <= orientation_tolerance:
+                reached = True
+                break
+            time.sleep(1.0 / max(float(self.hz), 1.0))
+
+        self.nextpos = goal.copy()
+        self._update_currpos()
+        print("", flush=True)
+        if not reached:
+            final_pos_err = np.linalg.norm(self.currpos[:3] - goal[:3])
+            print(
+                "[UREnv] movel_blocking_move timeout: "
+                f"position error={final_pos_err:.4f}m "
+                f"(tol={position_tolerance:.4f}m)",
+                flush=True,
+            )
+        return reached
+
     def go_to_reset(self, joint_reset=False):
+        # Ensure no residual speedL command is active before switching to pose reset.
+        self.velocity_stop(acceleration=0.5)
+        time.sleep(0.05)
         self._update_currpos()
         self._send_pos_command(self.currpos)
         time.sleep(0.3)
+        print("Finish go the current pose")
         self.session.post(self.url + "update_param", json=self.config.PRECISION_PARAM)
         time.sleep(0.5)
 
@@ -375,6 +449,8 @@ class UREnv(gym.Env):
             print("JOINT RESET")
             self.session.post(self.url + "jointreset")
             time.sleep(0.5)
+            print("Finish joint reset")
+
 
         if self.randomreset:
             reset_pose = self.resetpos.copy()
@@ -386,9 +462,14 @@ class UREnv(gym.Env):
                 -self.random_rz_range, self.random_rz_range
             )
             reset_pose[3:] = euler_2_quat(euler_random)
-            self.interpolate_move(reset_pose, timeout=1)
+            self.movel_blocking_move(reset_pose)
+            print("Finish go to the random reset pose:", reset_pose)
+
         else:
-            self.interpolate_move(self.resetpos.copy(), timeout=1)
+            reset_pose = self.resetpos.copy()
+            self.movel_blocking_move(reset_pose)
+            print("Finish go to the reset pose:", reset_pose)
+
 
         self.session.post(self.url + "update_param", json=self.config.COMPLIANCE_PARAM)
 

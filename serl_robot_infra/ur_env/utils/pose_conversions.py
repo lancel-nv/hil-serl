@@ -34,3 +34,16 @@ def ur6_to_pose7(ur6):
     """Convert UR [x, y, z, rx, ry, rz] (6-vector) to [x, y, z, qx, qy, qz, qw] (7-vector)."""
     ur6 = np.asarray(ur6, dtype=np.float64)
     return np.concatenate([ur6[:3], axisangle_to_quat(ur6[3:])])
+
+
+if __name__ == "__main__":
+    import requests
+    url = "http://127.0.0.1:5000/"
+    pose7 = requests.post(url + "getstate", timeout=2).json()["pose"]  # [x,y,z,qx,qy,qz,qw]
+    print(pose7)
+
+    pose6 = requests.post(url + "getpos_euler", timeout=2).json()["pose"]
+    print(pose6)
+
+
+

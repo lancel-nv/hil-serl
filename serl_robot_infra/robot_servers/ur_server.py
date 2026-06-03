@@ -204,14 +204,16 @@ class URServer:
         target = [float(pose7[0]), float(pose7[1]), float(pose7[2]),
                   float(rotvec[0]), float(rotvec[1]), float(rotvec[2])]
         if self.control_mode == "movel":
-            self.rtde_c.moveL(
+            ok = self.rtde_c.moveL(
                 target,
                 self.movel_speed,
                 self.movel_acceleration,
                 True,  # asynchronous
             )
+            if ok is False:
+                print("[ur_server] WARNING: moveL command was rejected by controller.")
         else:  # servol — validated in __init__
-            self.rtde_c.servoL(
+            ok = self.rtde_c.servoL(
                 target,
                 self.servo_velocity,
                 self.servo_acceleration,
@@ -219,17 +221,21 @@ class URServer:
                 self.servo_lookahead_time,
                 self.servo_gain,
             )
+            if ok is False:
+                print("[ur_server] WARNING: servoL command was rejected by controller.")
 
     def speed(self, velocity, acceleration=0.5, time_s=0.016):
         """Cartesian velocity command [vx, vy, vz, wx, wy, wz] via RTDE speedL."""
         velocity = np.asarray(velocity, dtype=np.float64)
         if velocity.shape != (6,):
             raise ValueError(f"/speedl expects a 6-vector, got shape {velocity.shape}")
-        self.rtde_c.speedL(
+        ok = self.rtde_c.speedL(
             [float(v) for v in velocity],
             float(acceleration),
             float(time_s),
         )
+        if ok is False:
+            print("[ur_server] WARNING: speedL command was rejected by controller.")
 
     def speed_stop(self, acceleration=0.5):
         self.rtde_c.speedStop(float(acceleration))

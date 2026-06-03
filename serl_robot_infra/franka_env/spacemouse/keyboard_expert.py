@@ -21,6 +21,7 @@ class KeyboardExpert:
         self._pressed_keys: Set[str] = set()
         self._lock = threading.Lock()
         self._last_reported_keys: Set[str] = set()
+        self._last_status_line_len = 0
 
         self.listener = keyboard.Listener(
             on_press=self._on_press,
@@ -57,7 +58,10 @@ class KeyboardExpert:
             return
         self._last_reported_keys = set(self._pressed_keys)
         keys = "".join(sorted(self._pressed_keys)) or "none"
-        print(f"Keyboard teleop active keys: {keys}", flush=True)
+        message = f"Keyboard teleop active keys: {keys}"
+        pad = " " * max(0, self._last_status_line_len - len(message))
+        print(message + pad, end="\r", flush=True)
+        self._last_status_line_len = len(message)
 
     def get_action(self) -> Tuple[np.ndarray, list]:
         with self._lock:
@@ -78,6 +82,10 @@ class KeyboardExpert:
             action[2] -= self.translation_step
 
         return np.clip(action, -1.0, 1.0), [0, 0, 0, 0]
+
+    def has_pressed_keys(self) -> bool:
+        with self._lock:
+            return len(self._pressed_keys) > 0
 
     def close(self):
         self.listener.stop()
