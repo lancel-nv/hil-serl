@@ -262,6 +262,55 @@ class UREnv(gym.Env):
         done = self.curr_path_length >= self.max_episode_length or reward or self.terminate
         return ob, int(reward), done, False, {"succeed": reward}
 
+    def velocity_step(
+        self,
+        action: np.ndarray,
+        speed_scale: float = 0.03,
+        acceleration: float = 0.5,
+    ) -> tuple:
+        """Step the UR with speedL for keyboard teleop interventions.
+
+        `action` uses the same normalized convention as the rest of the env, but
+        is converted to Cartesian velocity instead of a delta pose. This mirrors
+        the working `tests/test_arm.py` smoke test while keeping observations,
+        rewards, and episode termination in the normal env path.
+        """
+        start_time = time.time()
+        action = np.asarray(action, dtype=np.float32)
+        action = np.clip(action, self.action_space.low, self.action_space.high)
+
+        velocity = np.zeros(6, dtype=np.float32)
+        velocity[:3] = action[:3] * speed_scale
+
+        if action.shape[0] >= 7:
+            gripper_action = action[6] * self.action_scale[2]
+            self._send_gripper_command(gripper_action)
+        self._send_speed_command(
+            velocity,
+            acceleration=acceleration,
+            command_time=max((1.0 / self.hz) * 2.0, 0.008),
+        )
+
+        self.curr_path_length += 1
+        dt = time.time() - start_time
+        time.sleep(max(0, (1.0 / self.hz) - dt))
+
+        self._update_currpos()
+        ob = self._get_obs()
+        reward = self.compute_reward(ob)
+        done = self.curr_path_length >= self.max_episode_length or reward or self.terminate
+        return ob, int(reward), done, False, {"succeed": reward}
+
+    def idle_step(self) -> tuple:
+        """Advance time and observations without sending any robot motion command."""
+        time.sleep(1.0 / self.hz)
+        self.curr_path_length += 1
+        self._update_currpos()
+        ob = self._get_obs()
+        reward = self.compute_reward(ob)
+        done = self.curr_path_length >= self.max_episode_length or reward or self.terminate
+        return ob, int(reward), done, False, {"succeed": reward}
+
     def compute_reward(self, obs) -> bool:
         current_pose = obs["state"]["tcp_pose"]
         current_rot = Rotation.from_quat(current_pose[3:]).as_matrix()
@@ -419,6 +468,25 @@ class UREnv(gym.Env):
         self._recover()
         arr = np.array(pos).astype(np.float32)
         self.session.post(self.url + "pose", json={"arr": arr.tolist()})
+
+    def _send_speed_command(
+        self,
+        velocity: np.ndarray,
+        acceleration: float = 0.5,
+        command_time: float = 0.016,
+    ):
+        velocity = np.array(velocity).astype(np.float32)
+        self.session.post(
+            self.url + "speedl",
+            json={
+                "velocity": velocity.tolist(),
+                "acceleration": acceleration,
+                "time": command_time,
+            },
+        )
+
+    def velocity_stop(self, acceleration: float = 0.5):
+        self.session.post(self.url + "speedstop", json={"acceleration": acceleration})
 
     def _send_gripper_command(self, pos: float, mode="binary"):
         if mode == "binary":

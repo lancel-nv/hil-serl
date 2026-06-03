@@ -98,6 +98,8 @@ python serl_robot_infra/tests/test_arm.py
 
 **判断标准**：上面 6 步**全部 PASS**。任何一步 fail：先回去解决，再前进。每个 stage fail 的原因排查在 `serl_robot_infra/tests/README.md` 里。
 
+TODO： 图像采集是黑白的。用 ur conda 可以跑通测试，但是用hilserl conda就跑不通。
+
 ---
 
 ## 阶段 D：校准 example_ur 的工作空间（5 分钟）
@@ -128,13 +130,13 @@ curl -X POST http://127.0.0.1:5000/getpos_euler | python3 -m json.tool
 
 ### D.3 决定 RESET_POSE（每个 episode 开始的复位姿态）
 
-最简单：`RESET_POSE = TARGET_POSE + [0, 0, 0.05, 0, 0, 0]`（在目标正上方 5 cm）。代码里已经默认这样写，通常够用。
+最简单：`RESET_POSE = TARGET_POSE + [0, 0, 0.1, 0, 0, 0]`（在目标正上方 10 cm）。代码里已经默认这样写，通常够用。
 
 **也要确认安全盒**：`ABS_POSE_LIMIT_LOW/HIGH` 是机械臂能去的范围（相对 TARGET_POSE 的 ± 几 cm + 几 rad）。第一次跑请把数值调**严**一点：
 
 ```python
 ABS_POSE_LIMIT_LOW  = TARGET_POSE - np.array([0.03, 0.03, 0.02, 0.1, 0.1, 0.2])
-ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.03, 0.03, 0.08, 0.1, 0.1, 0.2])
+ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.03, 0.03, 0.08, 0.2, 0.1, 0.2])
 ```
 
 `ACTION_SCALE = (0.005, 0.03, 1.0)` 保持原样 —— 每 step 最多 5 mm + 0.03 rad，足够慢、足够安全。
@@ -143,7 +145,7 @@ ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.03, 0.03, 0.08, 0.1, 0.1, 0.2])
 
 ---
 
-## 阶段 E：录 demo（人类用 SpaceMouse 教 5-10 条成功轨迹）
+## 阶段 E：录 demo（人类用键盘教 5-10 条成功轨迹）
 
 terminal 1:
 ```bash
@@ -163,21 +165,19 @@ python examples/record_demos.py --exp_name example_ur --successes_needed 5
 
 会发生的事：
 
-**目前有bug： orbbec 是黑色的，spacemouse无响应**
-
 1. 弹出图像窗口（Orbbec 视图，已 resize 到 128×128 拼接）
-2. 机械臂 reset 到 RESET_POSE，然后**停在那等你动 SpaceMouse**
-3. 你用 SpaceMouse 把末端推向 TARGET_POSE。此时 policy 还没训过，脚本发的是全 0 action，只有你的 SpaceMouse 输入会被采纳（`SpacemouseIntervention` wrapper）
+2. 机械臂通过 `launch_ur_server.sh` 里的 `reset_joint_target` 执行 `/jointreset`，回到每条 episode 的固定起点，然后**等你用键盘控制**
+3. 你用键盘把末端推向 TARGET_POSE。此时 policy 还没训过，脚本发的是全 0 action，只有你的键盘输入会被采纳（`KeyboardIntervention` wrapper，通过 UR server 的 `/speedl` 控制）
 4. 一旦末端到 TARGET_POSE ± REWARD_THRESHOLD 容差内，`compute_reward → True`，`done=True`，本条 episode 成功（`info["succeed"]=True`），存到 `transitions`
 5. 自动 reset 开下一条
 6. 重复直到 5 条成功，存到 `demo_data/example_ur_5_demos_<时间戳>.pkl`
 
 **小技巧**：
 
-- 录之前先用 SpaceMouse 空跑两条熟悉手感，再开始正式录
-- SpaceMouse 左键 = 关爪，右键 = 开爪（reach 任务用不到，但要记着）
-- 想丢弃当前 trajectory：直接让它超 `MAX_EPISODE_LENGTH=100`（约 10 秒），它会 reset 不存
-- 如果机械臂走到安全盒边界 → `clip_safety_box` 会硬截，看起来像"卡住"。把 SpaceMouse 往反方向推
+- 录之前先跑 `python serl_robot_infra/tests/test_arm.py` 确认 UR server + 键盘速度控制正常
+- 键盘控制：`W/S = -X/+X`，`A/D = -Y/+Y`，`Q/E = +Z/-Z`
+- 想丢弃当前 trajectory：直接让它超 `MAX_EPISODE_LENGTH=100`（约 10 秒），它会 `/jointreset` 后进入下一条
+- 没按键时脚本只读状态，不会发送 zero-action 位姿命令；只有键盘介入时才通过 `/speedl` 控制机械臂
 - 想中止：terminal 里 Ctrl+C，或键盘按 Esc
 
 **判断标准**：`demo_data/` 下出现一个 `.pkl` 文件 → 阶段 E 完成。

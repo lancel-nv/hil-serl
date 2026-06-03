@@ -246,6 +246,10 @@ class URServer:
             pass
 
     def reset_joint(self):
+        try:
+            self.rtde_c.speedStop(self.servo_acceleration)
+        except Exception:
+            pass
         self._stop_motion()
         time.sleep(0.1)
         self.rtde_c.moveJ(self.reset_joint_target, self.movej_speed, self.movej_acceleration)

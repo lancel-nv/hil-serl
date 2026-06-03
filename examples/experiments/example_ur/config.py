@@ -45,14 +45,14 @@ class EnvConfig(DefaultEnvConfig):
 
     # Conservative placeholders — REPLACE with values from /getpos_euler at your safe workspace pose.
     TARGET_POSE = np.array([0.40, 0.00, 0.30, np.pi, 0.0, 0.0])
-    RESET_POSE = TARGET_POSE + np.array([0.0, 0.0, 0.05, 0, 0, 0])
+    RESET_POSE = TARGET_POSE + np.array([0.0, 0.0, 0.1, 0, 0, 0])
     REWARD_THRESHOLD = np.array([0.01, 0.01, 0.01, 0.1, 0.1, 0.1])
     ABS_POSE_LIMIT_LOW = TARGET_POSE - np.array([0.05, 0.05, 0.03, 0.2, 0.2, 0.3])
-    ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.05, 0.05, 0.10, 0.2, 0.2, 0.3])
+    ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.05, 0.05, 0.20, 0.2, 0.2, 0.3])
 
-    RANDOM_RESET = False
+    RANDOM_RESET = True
     RANDOM_XY_RANGE = 0.02
-    RANDOM_RZ_RANGE = 0.05
+    RANDOM_RZ_RANGE = 0.00
 
     # Deliberately slow for first-run safety; raise once verified.
     ACTION_SCALE = (0.005, 0.03, 1.0)

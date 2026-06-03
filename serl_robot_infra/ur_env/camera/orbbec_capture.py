@@ -1,14 +1,9 @@
-"""Orbbec depth-camera capture wrapper, RSCapture-compatible.
+"""Orbbec capture wrapper.
 
-Mirrors `franka_env.camera.rs_capture.RSCapture`:
-- `read() -> (bool, np.ndarray)` returning BGR HWC uint8 frames
-- `close()` shuts the pipeline down
-
-VideoCapture (the thread wrapper) consumes this contract identically.
-
-pyorbbecsdk is imported lazily inside `__init__` so missing-dep failure raises a
-clear error only when an Orbbec camera is actually requested in a task config.
+Only keeps the user-verified working path:
+`/dev/video4` + `BA81` + Bayer(BG) demosaic to BGR.
 """
+
 import cv2
 import numpy as np
 
@@ -22,130 +17,63 @@ class OrbbecCapture:
         fps: int = 30,
         exposure: int | None = None,
     ):
-        try:
-            from pyorbbecsdk import (
-                Pipeline,
-                Config,
-                OBSensorType,
-                OBFormat,
-                OBConvertFormat,
-                FormatConvertFilter,
-                Context,
-                OBLogLevel,
-            )
-        except ImportError as e:
-            raise ImportError(
-                "pyorbbecsdk is required for OrbbecCapture but is not installed. "
-                "See the install steps in "
-                "/media/data/Projects/2024-05-21-Robotics/2026-02-24-UR/ur_utils/README.md"
-            ) from e
-
-        Context.set_logger_level(OBLogLevel.ERROR)
-
+        # Keep ctor signature compatible with existing call sites.
+        _ = (serial_number, exposure)
         self.name = name
         self.dim = dim
-        self._OBFormat = OBFormat  # stash for _frame_to_bgr
-        self._OBConvertFormat = OBConvertFormat
-        self._FormatConvertFilter = FormatConvertFilter
+        self.fps = fps
+        self.device_path = "/dev/video4"
+        self._cap = cv2.VideoCapture(self.device_path, cv2.CAP_V4L2)
+        if not self._cap.isOpened():
+            raise RuntimeError(f"Failed to open Orbbec color device: {self.device_path}")
 
-        self.pipeline = Pipeline()
-        config = Config()
-
-        if serial_number is not None:
-            try:
-                config.enable_device_by_serial_number(serial_number)
-            except Exception:
-                # Older pyorbbecsdk versions may not expose this method; default device is fine
-                # when only one Orbbec is attached.
-                pass
-
-        profile_list = self.pipeline.get_stream_profile_list(OBSensorType.COLOR_SENSOR)
-        if profile_list is None:
-            raise RuntimeError(f"Orbbec camera '{name}' has no color sensor profile list")
-
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.dim[0])
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.dim[1])
+        self._cap.set(cv2.CAP_PROP_FPS, self.fps)
+        self._cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
         try:
-            color_profile = profile_list.get_video_stream_profile(dim[0], dim[1], OBFormat.MJPG, fps)
-        except Exception:
-            try:
-                color_profile = profile_list.get_video_stream_profile(dim[0], dim[1], OBFormat.RGB, fps)
-            except Exception:
-                color_profile = profile_list.get_default_video_stream_profile()
-
-        config.enable_stream(color_profile)
-        self.pipeline.start(config)
-
-        if exposure is not None:
-            try:
-                device = self.pipeline.get_device()
-                device.set_int_property("color_exposure", int(exposure))
-            except Exception:
-                pass
-
-        # Warm-up — first few frames after pipeline.start may be empty.
-        for _ in range(5):
-            try:
-                f = self.pipeline.wait_for_frames(500)
-                if f is not None and f.get_color_frame() is not None:
-                    break
-            except Exception:
-                pass
-
-    def _frame_to_bgr(self, frame) -> np.ndarray | None:
-        OBFormat = self._OBFormat
-        width = frame.get_width()
-        height = frame.get_height()
-        fmt = frame.get_format()
-        data = np.asanyarray(frame.get_data())
-
-        if fmt == OBFormat.RGB:
-            image = np.resize(data, (height, width, 3))
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        elif fmt == OBFormat.BGR:
-            image = np.resize(data, (height, width, 3))
-        elif fmt == OBFormat.YUYV:
-            image = np.resize(data, (height, width, 2))
-            image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_YUYV)
-        elif fmt == OBFormat.MJPG:
-            convert_filter = self._FormatConvertFilter()
-            convert_filter.set_format_convert_format(self._OBConvertFormat.MJPG_TO_RGB888)
-            rgb_frame = convert_filter.process(frame)
-            if rgb_frame is None:
-                return None
-            rgb_data = np.asanyarray(rgb_frame.get_data())
-            image = np.resize(rgb_data, (height, width, 3))
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        elif fmt == OBFormat.UYVY:
-            image = np.resize(data, (height, width, 2))
-            image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_UYVY)
-        elif fmt == OBFormat.NV12:
-            yuv = data.reshape((height * 3 // 2, width))
-            image = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_NV12)
-        elif fmt == OBFormat.NV21:
-            yuv = data.reshape((height * 3 // 2, width))
-            image = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_NV21)
-        else:
-            return None
-        return image
-
-    def read(self):
-        try:
-            frames = self.pipeline.wait_for_frames(500)
-            if frames is None:
-                return False, None
-            color_frame = frames.get_color_frame()
-            if color_frame is None:
-                return False, None
-            image = self._frame_to_bgr(color_frame)
-            if image is None:
-                return False, None
-            if image.shape[1] != self.dim[0] or image.shape[0] != self.dim[1]:
-                image = cv2.resize(image, self.dim)
-            return True, image
-        except Exception:
-            return False, None
-
-    def close(self):
-        try:
-            self.pipeline.stop()
+            self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"BA81"))
         except Exception:
             pass
+
+        # Warm-up to avoid empty first frame.
+        for _ in range(10):
+            ok, _frame = self.read()
+            if ok and _frame is not None:
+                break
+
+    def _read_raw_frame(self, trials: int = 8):
+        for _ in range(trials):
+            ok, frame = self._cap.read()
+            if ok and frame is not None:
+                return frame
+        return None
+
+    def _decode_ba81_to_bgr(self, frame):
+        raw = np.asanyarray(frame).ravel()
+        expected = self.dim[0] * self.dim[1]
+        if raw.size < expected:
+            return None
+        bayer = raw[:expected].reshape(self.dim[1], self.dim[0])
+        return cv2.cvtColor(bayer, cv2.COLOR_BAYER_BG2BGR)
+
+    def read(self):
+        if self._cap is None:
+            return False, None
+        raw = self._read_raw_frame(trials=8)
+        if raw is None:
+            return False, None
+        bgr = self._decode_ba81_to_bgr(raw)
+        if bgr is None:
+            return False, None
+        if bgr.shape[1] != self.dim[0] or bgr.shape[0] != self.dim[1]:
+            bgr = cv2.resize(bgr, self.dim)
+        return True, bgr
+
+    def close(self):
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None

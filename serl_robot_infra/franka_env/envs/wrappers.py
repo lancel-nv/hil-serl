@@ -200,6 +200,25 @@ class GripperCloseEnv(gym.ActionWrapper):
         if "intervene_action" in info:
             info["intervene_action"] = info["intervene_action"][:6]
         return obs, rew, done, truncated, info
+
+    def velocity_step(self, action, *args, **kwargs):
+        if not hasattr(self.env, "velocity_step"):
+            raise AttributeError("wrapped env does not support velocity_step")
+        new_action = self.action(action)
+        obs, rew, done, truncated, info = self.env.velocity_step(new_action, *args, **kwargs)
+        if "intervene_action" in info:
+            info["intervene_action"] = info["intervene_action"][:6]
+        return obs, rew, done, truncated, info
+
+    def velocity_stop(self, *args, **kwargs):
+        if hasattr(self.env, "velocity_stop"):
+            return self.env.velocity_stop(*args, **kwargs)
+        return None
+
+    def idle_step(self, *args, **kwargs):
+        if not hasattr(self.env, "idle_step"):
+            raise AttributeError("wrapped env does not support idle_step")
+        return self.env.idle_step(*args, **kwargs)
     
     def reset(self, **kwargs):
         return self.env.reset(**kwargs)
@@ -270,7 +289,14 @@ class SpacemouseIntervention(gym.ActionWrapper):
 
 
 class KeyboardIntervention(SpacemouseIntervention):
-    def __init__(self, env, action_indices=None, translation_step=1.0):
+    def __init__(
+        self,
+        env,
+        action_indices=None,
+        translation_step=1.0,
+        velocity_speed_scale=0.03,
+        velocity_acceleration=0.5,
+    ):
         from franka_env.spacemouse.keyboard_expert import KeyboardExpert
 
         gym.ActionWrapper.__init__(self, env)
@@ -283,11 +309,29 @@ class KeyboardIntervention(SpacemouseIntervention):
         self.left, self.right = False, False
         self.action_indices = action_indices
         self._last_debug_print = 0.0
+        self.velocity_speed_scale = velocity_speed_scale
+        self.velocity_acceleration = velocity_acceleration
+        self._velocity_active = False
 
     def step(self, action):
         new_action, replaced = self.action(action)
 
-        obs, rew, done, truncated, info = self.env.step(new_action)
+        if replaced and hasattr(self.env, "velocity_step"):
+            obs, rew, done, truncated, info = self.env.velocity_step(
+                new_action,
+                speed_scale=self.velocity_speed_scale,
+                acceleration=self.velocity_acceleration,
+            )
+            self._velocity_active = True
+        else:
+            if self._velocity_active and hasattr(self.env, "velocity_stop"):
+                self.env.velocity_stop(acceleration=self.velocity_acceleration)
+                self._velocity_active = False
+            if np.linalg.norm(new_action) < 0.001 and hasattr(self.env, "idle_step"):
+                obs, rew, done, truncated, info = self.env.idle_step()
+            else:
+                obs, rew, done, truncated, info = self.env.step(new_action)
+
         if replaced:
             info["intervene_action"] = new_action
             now = time.time()
@@ -303,6 +347,12 @@ class KeyboardIntervention(SpacemouseIntervention):
         info["left"] = self.left
         info["right"] = self.right
         return obs, rew, done, truncated, info
+
+    def close(self):
+        if self._velocity_active and hasattr(self.env, "velocity_stop"):
+            self.env.velocity_stop(acceleration=self.velocity_acceleration)
+            self._velocity_active = False
+        return super().close()
 
 
 class DualSpacemouseIntervention(gym.ActionWrapper):
