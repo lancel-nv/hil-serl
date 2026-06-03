@@ -190,8 +190,10 @@ python examples/record_demos.py --exp_name example_ur --successes_needed 5
 python examples/train_bc.py \
     --exp_name=example_ur \
     --train_steps=10000 \
+    --eval_n_trajs=5 \
     --bc_checkpoint_path=./bc_ckpt_example_ur
 ```
+TODO: 存在 bug，机械臂会突然停下无法控制，怀疑是代码哪里有冲突。
 
 `train_bc.py` 会：
 
