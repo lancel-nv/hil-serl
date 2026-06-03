@@ -41,7 +41,27 @@ flags.DEFINE_boolean(
 
 devices = jax.local_devices()
 num_devices = len(devices)
-sharding = jax.sharding.PositionalSharding(devices)
+mesh = jax.sharding.Mesh(np.array(devices), ("data",))
+replicated_sharding = jax.sharding.NamedSharding(
+    mesh, jax.sharding.PartitionSpec()
+)
+
+
+def resolve_checkpoint_dir(path: str) -> str:
+    """Normalize checkpoint path to a directory path for Flax/Orbax."""
+    abs_path = os.path.abspath(path)
+    if os.path.isdir(abs_path):
+        return abs_path
+
+    # If a file path (e.g. *.pkl) is provided, save checkpoints in a sibling dir.
+    if os.path.isfile(abs_path):
+        stem, _ = os.path.splitext(abs_path)
+        return f"{stem}_bc_ckpt"
+
+    stem, suffix = os.path.splitext(abs_path)
+    if suffix:
+        return f"{stem}_bc_ckpt"
+    return abs_path
 
 
 def print_green(x):
@@ -95,6 +115,7 @@ def train(
     bc_agent: BCAgent,
     bc_replay_buffer,
     config: DefaultTrainingConfig,
+    checkpoint_dir: str,
     wandb_logger=None,
 ):
 
@@ -103,7 +124,7 @@ def train(
             "batch_size": config.batch_size,
             "pack_obs_and_next_obs": False,
         },
-        device=sharding.replicate(),
+        device=replicated_sharding,
     )
     
     # Pretrain BC policy to get started
@@ -118,7 +139,7 @@ def train(
             wandb_logger.log({"bc": bc_update_info}, step=step)
         if step > FLAGS.train_steps - 100 and step % 10 == 0:
             checkpoints.save_checkpoint(
-                os.path.abspath(FLAGS.bc_checkpoint_path), bc_agent.state, step=step, keep=5
+                checkpoint_dir, bc_agent.state, step=step, keep=5
             )
     print_green("bc pretraining done and saved checkpoint")
 
@@ -128,6 +149,12 @@ def train(
 
 def main(_):
     config: DefaultTrainingConfig = CONFIG_MAPPING[FLAGS.exp_name]()
+    assert FLAGS.bc_checkpoint_path, "--bc_checkpoint_path must be provided."
+    checkpoint_dir = resolve_checkpoint_dir(FLAGS.bc_checkpoint_path)
+    if os.path.abspath(FLAGS.bc_checkpoint_path) != checkpoint_dir:
+        print_yellow(
+            f"Resolved --bc_checkpoint_path to checkpoint dir: {checkpoint_dir}"
+        )
 
     assert config.batch_size % num_devices == 0
     assert FLAGS.exp_name in CONFIG_MAPPING, "Experiment folder not found."
@@ -150,12 +177,13 @@ def main(_):
     # replicate agent across devices
     # need the jnp.array to avoid a bug where device_put doesn't recognize primitives
     bc_agent: BCAgent = jax.device_put(
-        jax.tree_util.tree_map(jnp.array, bc_agent), sharding.replicate()
+        jax.tree_util.tree_map(jnp.array, bc_agent), replicated_sharding
     )
 
     if not eval_mode:
+        os.makedirs(checkpoint_dir, exist_ok=True)
         assert not os.path.isdir(
-            os.path.join(FLAGS.bc_checkpoint_path, f"checkpoint_{FLAGS.train_steps}")
+            os.path.join(checkpoint_dir, f"checkpoint_{FLAGS.train_steps}")
         )
 
         bc_replay_buffer = MemoryEfficientReplayBufferDataStore(
@@ -191,14 +219,15 @@ def main(_):
             bc_replay_buffer=bc_replay_buffer,
             wandb_logger=wandb_logger,
             config=config,
+            checkpoint_dir=checkpoint_dir,
         )
 
     else:
         rng = jax.random.PRNGKey(FLAGS.seed)
-        sampling_rng = jax.device_put(rng, sharding.replicate())
+        sampling_rng = jax.device_put(rng, replicated_sharding)
 
         bc_ckpt = checkpoints.restore_checkpoint(
-            FLAGS.bc_checkpoint_path,
+            checkpoint_dir,
             bc_agent.state,
         )
         bc_agent = bc_agent.replace(state=bc_ckpt)

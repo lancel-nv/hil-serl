@@ -51,7 +51,10 @@ flags.DEFINE_boolean(
 
 devices = jax.local_devices()
 num_devices = len(devices)
-sharding = jax.sharding.PositionalSharding(devices)
+mesh = jax.sharding.Mesh(np.array(devices), ("data",))
+replicated_sharding = jax.sharding.NamedSharding(
+    mesh, jax.sharding.PartitionSpec()
+)
 
 
 def print_green(x):
@@ -264,7 +267,7 @@ def learner(rng, agent: BCAgent, demo_buffer, wandb_logger=None):
             "batch_size": config.batch_size,
             "pack_obs_and_next_obs": True,
         },
-        device=sharding.replicate(),
+        device=replicated_sharding,
     )
 
     # Pretrain BC policy to get started
@@ -362,11 +365,11 @@ def main(_):
     # replicate agent across devices
     # need the jnp.array to avoid a bug where device_put doesn't recognize primitives
     agent: BCAgent = jax.device_put(
-        jax.tree_util.tree_map(jnp.array, agent), sharding.replicate()
+        jax.tree_util.tree_map(jnp.array, agent), replicated_sharding
     )
 
     if FLAGS.learner:
-        sampling_rng = jax.device_put(sampling_rng, device=sharding.replicate())
+        sampling_rng = jax.device_put(sampling_rng, device=replicated_sharding)
         wandb_logger = make_wandb_logger(
             project="hil-serl",
             description=FLAGS.exp_name,
@@ -406,7 +409,7 @@ def main(_):
         )
 
     elif FLAGS.actor:
-        sampling_rng = jax.device_put(sampling_rng, sharding.replicate())
+        sampling_rng = jax.device_put(sampling_rng, replicated_sharding)
         data_store = QueuedDataStore(50000)  # the queue size on the actor
         
         actor(

@@ -30,7 +30,10 @@ def main(_):
     env = config.get_environment(fake_env=True, save_video=False, classifier=False)
 
     devices = jax.local_devices()
-    sharding = jax.sharding.PositionalSharding(devices)
+    mesh = jax.sharding.Mesh(np.array(devices), ("data",))
+    replicated_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec()
+    )
     
     # Create buffer for positive transitions
     pos_buffer = ReplayBuffer(
@@ -54,7 +57,7 @@ def main(_):
         sample_args={
             "batch_size": FLAGS.batch_size // 2,
         },
-        device=sharding.replicate(),
+        device=replicated_sharding,
     )
     
     # Create buffer for negative transitions
@@ -80,7 +83,7 @@ def main(_):
         sample_args={
             "batch_size": FLAGS.batch_size // 2,
         },
-        device=sharding.replicate(),
+        device=replicated_sharding,
     )
 
     print(f"failed buffer size: {len(neg_buffer)}")

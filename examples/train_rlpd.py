@@ -54,7 +54,10 @@ flags.DEFINE_boolean(
 
 devices = jax.local_devices()
 num_devices = len(devices)
-sharding = jax.sharding.PositionalSharding(devices)
+mesh = jax.sharding.Mesh(np.array(devices), ("data",))
+replicated_sharding = jax.sharding.NamedSharding(
+    mesh, jax.sharding.PartitionSpec()
+)
 
 
 def print_green(x):
@@ -291,14 +294,14 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
             "batch_size": config.batch_size // 2,
             "pack_obs_and_next_obs": True,
         },
-        device=sharding.replicate(),
+        device=replicated_sharding,
     )
     demo_iterator = demo_buffer.get_iterator(
         sample_args={
             "batch_size": config.batch_size // 2,
             "pack_obs_and_next_obs": True,
         },
-        device=sharding.replicate(),
+        device=replicated_sharding,
     )
 
     # wait till the replay buffer is filled with enough data
@@ -413,7 +416,7 @@ def main(_):
     # replicate agent across devices
     # need the jnp.array to avoid a bug where device_put doesn't recognize primitives
     agent = jax.device_put(
-        jax.tree_util.tree_map(jnp.array, agent), sharding.replicate()
+        jax.tree_util.tree_map(jnp.array, agent), replicated_sharding
     )
 
     if FLAGS.checkpoint_path is not None and os.path.exists(FLAGS.checkpoint_path):
@@ -445,7 +448,7 @@ def main(_):
         return replay_buffer, wandb_logger
 
     if FLAGS.learner:
-        sampling_rng = jax.device_put(sampling_rng, device=sharding.replicate())
+        sampling_rng = jax.device_put(sampling_rng, device=replicated_sharding)
         replay_buffer, wandb_logger = create_replay_buffer_and_wandb_logger()
         demo_buffer = MemoryEfficientReplayBufferDataStore(
             env.observation_space,
@@ -503,7 +506,7 @@ def main(_):
         )
 
     elif FLAGS.actor:
-        sampling_rng = jax.device_put(sampling_rng, sharding.replicate())
+        sampling_rng = jax.device_put(sampling_rng, replicated_sharding)
         data_store = QueuedDataStore(50000)  # the queue size on the actor
         intvn_data_store = QueuedDataStore(50000)
 
