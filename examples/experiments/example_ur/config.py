@@ -28,7 +28,7 @@ from serl_launcher.wrappers.chunking import ChunkingWrapper
 from serl_launcher.wrappers.serl_obs_wrappers import SERLObsWrapper
 
 from experiments.config import DefaultTrainingConfig
-from experiments.example_ur.wrapper import URExampleEnv
+from experiments.example_ur.wrapper import PositionOnlyGripperCloseEnv, URExampleEnv
 from ur_env.envs.ur_env import DefaultEnvConfig
 
 
@@ -87,7 +87,10 @@ class TrainConfig(DefaultTrainingConfig):
 
     def get_environment(self, fake_env=False, save_video=False, classifier=False):
         env = URExampleEnv(fake_env=fake_env, save_video=save_video, config=EnvConfig())
-        env = GripperCloseEnv(env)
+        # Position-only control (rotation action disabled) to work around the
+        # clip_safety_box roll-wraparound flip bug; see README_LANCEL.md.
+        # Revert to GripperCloseEnv to restore 6-DoF once the clip bug is fixed.
+        env = PositionOnlyGripperCloseEnv(env)
         if not fake_env:
             # velocity_teleop=False: keyboard jogs via the pose step path (servoL),
             # so demo collection uses the same control path as policy execution.

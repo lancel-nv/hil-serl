@@ -377,6 +377,11 @@ def main(_):
         classifier=True,
     )
     env = RecordEpisodeStatistics(env)
+    # Reset to the deterministic initial pose (RESET_POSE) without randomization for now.
+    env.unwrapped.randomreset = False
+    # One-time blocking moveJ to the safe joint home before any servoL (actor only; learner is fake_env).
+    if FLAGS.actor:
+        env.unwrapped.move_to_safe()
 
     rng, sampling_rng = jax.random.split(rng)
     

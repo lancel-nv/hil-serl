@@ -17,7 +17,11 @@ def main(_):
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
     env = config.get_environment(fake_env=False, save_video=False, classifier=True)
+    # Reset to the deterministic initial pose (RESET_POSE) without randomization for now.
+    env.unwrapped.randomreset = False
     try:
+        # One-time blocking moveJ to the safe joint home before any servoL streaming.
+        env.unwrapped.move_to_safe()
         obs, info = env.reset()
         print("Reset done")
         transitions = []

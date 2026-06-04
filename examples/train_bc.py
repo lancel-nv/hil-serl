@@ -165,6 +165,11 @@ def main(_):
         classifier=True,
     )
     env = RecordEpisodeStatistics(env)
+    # Reset to the deterministic initial pose (RESET_POSE) without randomization for now.
+    env.unwrapped.randomreset = False
+    # One-time blocking moveJ to the safe joint home before any servoL (eval only; training is fake_env).
+    if eval_mode:
+        env.unwrapped.move_to_safe()
 
     bc_agent: BCAgent = make_bc_agent(
         seed=FLAGS.seed,

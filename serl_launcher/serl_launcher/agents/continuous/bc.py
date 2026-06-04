@@ -52,7 +52,7 @@ class BCAgent(flax.struct.PyTreeNode):
                 rngs={"dropout": key},
                 name="actor",
             )
-            pi_actions = dist.mode()
+            pi_actions = dist.mode() # 取分布均值
             if self.config["tanh_squash_distribution"]:
                 batch_actions = jnp.clip(batch["actions"], -1+1e-6, 1-1e-6)
             else:
