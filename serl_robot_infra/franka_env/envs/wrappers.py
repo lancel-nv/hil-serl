@@ -296,6 +296,7 @@ class KeyboardIntervention(SpacemouseIntervention):
         translation_step=1.0,
         velocity_speed_scale=0.03,
         velocity_acceleration=0.5,
+        velocity_teleop=True,
     ):
         from franka_env.spacemouse.keyboard_expert import KeyboardExpert
 
@@ -311,6 +312,10 @@ class KeyboardIntervention(SpacemouseIntervention):
         self._last_debug_print = 0.0
         self.velocity_speed_scale = velocity_speed_scale
         self.velocity_acceleration = velocity_acceleration
+        # velocity_teleop=True -> jog via speedL (velocity_step). False -> drive the
+        # normal pose step path (servoL/movel), so demo collection uses the SAME
+        # control path as policy execution (action recorded == action replayed).
+        self.velocity_teleop = velocity_teleop
         self._velocity_active = False
         self._require_key_release_after_reset = False
         self._reset_gate_reported = False
@@ -336,7 +341,7 @@ class KeyboardIntervention(SpacemouseIntervention):
     def step(self, action):
         new_action, replaced = self.action(action)
 
-        if replaced and hasattr(self.env, "velocity_step"):
+        if self.velocity_teleop and replaced and hasattr(self.env, "velocity_step"):
             obs, rew, done, truncated, info = self.env.velocity_step(
                 new_action,
                 speed_scale=self.velocity_speed_scale,

@@ -10,8 +10,8 @@ Architecture:
 - A background thread polls UR state at `--state_hz` (default 200 Hz) and caches
   pose / vel / force / joint / jacobian in a lock-guarded snapshot. `/getstate`
   is therefore a memory read, sub-ms.
-- `/pose` dispatches according to `--control_mode`:
-    - `movel` (default): `moveL(target, speed, accel, asynchronous=True)`. Each
+- `/pose` dispatches according to `--control_mode` (default: `servol`):
+    - `movel`: `moveL(target, speed, accel, asynchronous=True)`. Each
       call plans a trapezoidal Cartesian motion to the target and returns
       immediately. If a previous async moveL is still in flight when a new pose
       arrives, the new call replaces it — so streaming small deltas at fixed hz
@@ -70,13 +70,22 @@ flags.DEFINE_string("flask_url", "127.0.0.1", "Host to bind the Flask server on"
 flags.DEFINE_integer("flask_port", 5000, "Port to bind the Flask server on")
 flags.DEFINE_integer("state_hz", 200, "State cache refresh rate")
 flags.DEFINE_enum(
-    "control_mode", "movel", ["movel", "servol"],
+    "control_mode", "servol", ["movel", "servol", "servoj"],
     "How /pose moves the arm. movel=trapezoidal trajectory per call (conservative); "
-    "servol=streaming real-time servo (matches Franka delta-pose feel).",
+    "servol=streaming real-time Cartesian servo (matches Franka delta-pose feel); "
+    "servoj=streaming real-time joint servo (IK on server, mirrors the gr00t servoJ "
+    "path that runs jitter-free). servoj/servol both require streaming setpoints, so "
+    "reset must stream poses (UREnv.interpolate_move) instead of a single /pose.",
 )
 flags.DEFINE_float("movel_speed", 0.1, "moveL Cartesian speed (m/s) for /pose")
 flags.DEFINE_float("movel_acceleration", 0.5, "moveL Cartesian acceleration (m/s^2) for /pose")
-flags.DEFINE_float("servo_dt", 0.008, "servoL dt parameter (s)")
+flags.DEFINE_float(
+    "servo_dt", 0.1,
+    "servoL/servoJ 'time' arg (s): how long each command actively controls the "
+    "robot. MUST match the env control period (1/hz). UREnv runs at hz=10, so the "
+    "default is 0.1s. If this is much smaller than the time between /pose calls, "
+    "the servo times out between commands and the arm barely moves.",
+)
 flags.DEFINE_float("servo_lookahead_time", 0.1, "servoL lookahead time (s)")
 flags.DEFINE_float("servo_gain", 300.0, "servoL gain")
 flags.DEFINE_float("servo_velocity", 0.5, "servoL velocity arg")
@@ -91,10 +100,10 @@ class URServer:
         robot_ip,
         reset_joint_target,
         state_hz=200,
-        control_mode="movel",
+        control_mode="servol",
         movel_speed=0.1,
         movel_acceleration=0.5,
-        servo_dt=0.008,
+        servo_dt=0.1,
         servo_lookahead_time=0.1,
         servo_gain=300.0,
         servo_velocity=0.5,
@@ -102,8 +111,10 @@ class URServer:
         movej_speed=1.0,
         movej_acceleration=1.0,
     ):
-        if control_mode not in ("movel", "servol"):
-            raise ValueError(f"control_mode must be 'movel' or 'servol', got {control_mode!r}")
+        if control_mode not in ("movel", "servol", "servoj"):
+            raise ValueError(
+                f"control_mode must be 'movel', 'servol' or 'servoj', got {control_mode!r}"
+            )
         self.robot_ip = robot_ip
         self.reset_joint_target = [float(q) for q in reset_joint_target]
         self.control_mode = control_mode
@@ -195,7 +206,11 @@ class URServer:
           Cartesian motion per call. A new /pose while one is in flight replaces
           the in-flight trajectory.
         - 'servol': servoL(target, vel, accel, dt, lookahead, gain). Streaming
-          real-time servo; controller interpolates between consecutive setpoints.
+          real-time Cartesian servo; controller interpolates between setpoints.
+        - 'servoj': IK the Cartesian target to joints (seeded with the current
+          joint config so the solution stays on the same branch / no flips), then
+          servoJ. This mirrors the gr00t workflow/4.gr00t_run.py path that streams
+          servoJ jitter-free. Like servol, it needs streaming setpoints.
         """
         pose7 = np.asarray(pose7, dtype=np.float64)
         if pose7.shape != (7,):
@@ -212,7 +227,7 @@ class URServer:
             )
             if ok is False:
                 print("[ur_server] WARNING: moveL command was rejected by controller.")
-        else:  # servol — validated in __init__
+        elif self.control_mode == "servol":
             ok = self.rtde_c.servoL(
                 target,
                 self.servo_velocity,
@@ -223,6 +238,24 @@ class URServer:
             )
             if ok is False:
                 print("[ur_server] WARNING: servoL command was rejected by controller.")
+        else:  # servoj — validated in __init__
+            with self._state_lock:
+                qnear = self.q.tolist()
+            try:
+                q_target = self.rtde_c.getInverseKinematics(target, qnear)
+            except Exception as e:
+                print(f"[ur_server] servoJ IK failed ({e}); skipping command.")
+                return
+            ok = self.rtde_c.servoJ(
+                q_target,
+                0.0,  # speed (unused by servoJ; matches gr00t reference)
+                0.0,  # acceleration (unused by servoJ)
+                self.servo_dt,
+                self.servo_lookahead_time,
+                self.servo_gain,
+            )
+            if ok is False:
+                print("[ur_server] WARNING: servoJ command was rejected by controller.")
 
     def speed(self, velocity, acceleration=0.5, time_s=0.016):
         """Cartesian velocity command [vx, vy, vz, wx, wy, wz] via RTDE speedL."""
@@ -252,11 +285,14 @@ class URServer:
             pass
 
     def reset_joint(self):
+        # Stop the active motion FIRST with the mode-correct stop (servoStop for
+        # servol/servoj). Calling speedStop first would run stopl() against a live
+        # servo thread and trip "another thread is already controlling the robot".
+        self._stop_motion()
         try:
             self.rtde_c.speedStop(self.servo_acceleration)
         except Exception:
             pass
-        self._stop_motion()
         time.sleep(0.1)
         self.rtde_c.moveJ(self.reset_joint_target, self.movej_speed, self.movej_acceleration)
         # Settle + verify
@@ -471,6 +507,15 @@ def main(_):
         robot_server.speed_stop(acceleration=data.get("acceleration", 0.5))
         return "SpeedStop"
 
+    @webapp.route("/stop", methods=["POST"])
+    def stop():
+        # Control-mode-aware stop: servoStop for servol/servoj, stopL for movel.
+        # Using the wrong stop (e.g. speedStop while a servo thread is running)
+        # makes the URScript stopl() fight the live servo thread, which trips the
+        # controller's "another thread is already controlling the robot" error.
+        robot_server._stop_motion()
+        return "Stopped"
+
     @webapp.route("/getstate", methods=["POST"])
     def get_state():
         snap = robot_server.snapshot()
@@ -485,7 +530,15 @@ def main(_):
         return "no-op (UR has no impedance compliance params)"
 
     try:
-        webapp.run(host=FLAGS.flask_url, port=FLAGS.flask_port)
+        # threaded=False is REQUIRED: ur_rtde's RTDEControlInterface (rtde_c) is not
+        # thread-safe. Flask's default threaded=True handles each request in its own
+        # thread, so two requests that both touch rtde_c can overlap -- especially now
+        # that servoL blocks for servo_dt (0.1s) inside /pose -- and the controller
+        # raises "another thread is already controlling the robot". Serializing all
+        # requests through one serving thread keeps every rtde_c call sequential. The
+        # 200Hz state poll uses the separate rtde_r (receive) interface, which is safe
+        # to run alongside rtde_c (standard ur_rtde dual-interface usage).
+        webapp.run(host=FLAGS.flask_url, port=FLAGS.flask_port, threaded=False)
     finally:
         if gripper_server is not None:
             gripper_server.shutdown()

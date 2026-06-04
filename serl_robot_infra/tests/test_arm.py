@@ -10,6 +10,11 @@ Controls:
     Q/E: +/-Z translation
     ESC: stop and exit
 
+Default jog mode is ``servol``: each cycle reads the current pose and streams a
+slightly advanced /pose setpoint, so the motion goes through the server's
+servoL path (same control path as record_demos / policy execution). Pass
+``--mode speedl`` to fall back to the old velocity (speedL) jog.
+
 No rotation, no gripper, no camera, no demo recording.
 """
 
@@ -25,11 +30,19 @@ DEFAULT_URL = "http://127.0.0.1:5000/"
 DEFAULT_SPEED = 0.03
 DEFAULT_ACCELERATION = 0.5
 DEFAULT_PERIOD = 0.02
+DEFAULT_MODE = "servol"
 REQUEST_TIMEOUT = 1.0
 
 
 class ServerKeyboardArmSmokeTest:
-    def __init__(self, url: str, speed: float, acceleration: float, period: float):
+    def __init__(
+        self,
+        url: str,
+        speed: float,
+        acceleration: float,
+        period: float,
+        mode: str = DEFAULT_MODE,
+    ):
         from pynput import keyboard
 
         self.keyboard = keyboard
@@ -37,6 +50,7 @@ class ServerKeyboardArmSmokeTest:
         self.speed = speed
         self.acceleration = acceleration
         self.period = period
+        self.mode = mode
         self.pressed_keys: Set[str] = set()
         self.lock = threading.Lock()
         self.running = True
@@ -45,7 +59,7 @@ class ServerKeyboardArmSmokeTest:
         self.session = requests.Session()
 
         state = self._get_state()
-        print(f"Connected to UR server at {self.url}")
+        print(f"Connected to UR server at {self.url} (jog mode: {self.mode})")
         self._print_state("Initial", state)
 
     def _post(self, route: str, payload=None):
@@ -72,6 +86,21 @@ class ServerKeyboardArmSmokeTest:
 
     def _send_stop(self):
         self._post("speedstop", {"acceleration": self.acceleration})
+
+    def _send_pose_step(self, velocity):
+        """servoL jog: advance the current pose by velocity * period and stream it.
+
+        Re-baselining on the actual pose each cycle keeps the setpoint ~one cycle
+        ahead of the robot, so servoL tracks at the requested Cartesian speed.
+        """
+        pose = list(self._get_state()["pose"])  # [x,y,z,qx,qy,qz,qw]
+        for i in range(3):
+            pose[i] += velocity[i] * self.period
+        self._post("pose", {"arr": pose})
+
+    def _freeze_pose(self):
+        """Stop equivalent for servoL: pin the setpoint at the current pose."""
+        self._post("pose", {"arr": list(self._get_state()["pose"])})
 
     def _key_name(self, key) -> str:
         try:
@@ -132,10 +161,16 @@ class ServerKeyboardArmSmokeTest:
 
             try:
                 if is_moving:
-                    self._send_speed(velocity)
+                    if self.mode == "servol":
+                        self._send_pose_step(velocity)
+                    else:
+                        self._send_speed(velocity)
                     self.was_moving = True
                 elif self.was_moving:
-                    self._send_stop()
+                    if self.mode == "servol":
+                        self._freeze_pose()
+                    else:
+                        self._send_stop()
                     self.was_moving = False
 
                 now = time.time()
@@ -175,7 +210,10 @@ class ServerKeyboardArmSmokeTest:
         self.running = False
         time.sleep(0.05)
         try:
-            self._send_stop()
+            if self.mode == "servol":
+                self._freeze_pose()
+            else:
+                self._send_stop()
         finally:
             try:
                 self._print_state("Final", self._get_state())
@@ -189,6 +227,12 @@ def main():
     parser.add_argument("--speed", type=float, default=DEFAULT_SPEED, help="Translation speed in m/s.")
     parser.add_argument("--acceleration", type=float, default=DEFAULT_ACCELERATION, help="speedL acceleration.")
     parser.add_argument("--period", type=float, default=DEFAULT_PERIOD, help="HTTP command period in seconds.")
+    parser.add_argument(
+        "--mode",
+        choices=["servol", "speedl"],
+        default=DEFAULT_MODE,
+        help="Jog via servoL pose streaming (default) or speedL velocity.",
+    )
     parser.add_argument("--yes", action="store_true", help="Skip the safety confirmation prompt.")
     args = parser.parse_args()
 
@@ -206,6 +250,7 @@ def main():
         speed=args.speed,
         acceleration=args.acceleration,
         period=args.period,
+        mode=args.mode,
     )
     try:
         tester.run()

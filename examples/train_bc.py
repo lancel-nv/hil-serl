@@ -222,6 +222,13 @@ def main(_):
             checkpoint_dir=checkpoint_dir,
         )
 
+        # Explicitly tear down background threads so the process exits cleanly.
+        # Without finishing the (online) wandb run and closing the env, the
+        # wandb uploader / display threads keep the interpreter alive.
+        if wandb_logger is not None and getattr(wandb_logger, "run", None) is not None:
+            wandb_logger.run.finish()
+        env.close()
+
     else:
         rng = jax.random.PRNGKey(FLAGS.seed)
         sampling_rng = jax.device_put(rng, replicated_sharding)
@@ -238,6 +245,7 @@ def main(_):
             bc_agent=bc_agent,
             sampling_rng=sampling_rng,
         )
+        env.close()
 
 
 if __name__ == "__main__":

@@ -101,6 +101,9 @@ class DefaultEnvConfig:
     GRIPPER_SLEEP: float = 0.6
     MAX_EPISODE_LENGTH: int = 100
     JOINT_RESET_PERIOD: int = 0
+    # Seconds spent streaming the reset trajectory (interpolate_move). Larger =
+    # slower/gentler reset. Steps streamed = RESET_INTERPOLATE_TIME * hz.
+    RESET_INTERPOLATE_TIME: float = 4.0
 
 
 ##############################################################################
@@ -149,6 +152,10 @@ class UREnv(gym.Env):
         self.random_rz_range = config.RANDOM_RZ_RANGE
         self.hz = hz
         self.joint_reset_cycle = config.JOINT_RESET_PERIOD
+        # Reset streams setpoints via interpolate_move (required for servoj/servol
+        # control modes, where a single /pose only servos for one cycle). Duration
+        # in seconds; steps = reset_interpolate_time * hz.
+        self.reset_interpolate_time = getattr(config, "RESET_INTERPOLATE_TIME", 4.0)
 
         self.save_video = save_video
         if self.save_video:
@@ -237,7 +244,10 @@ class UREnv(gym.Env):
 
     def step(self, action: np.ndarray) -> tuple:
         start_time = time.time()
+        print(f"action before clip: {action}")
         action = np.clip(action, self.action_space.low, self.action_space.high)
+        print(f"action after clip: {action}")
+
         xyz_delta = action[:3]
 
         self.nextpos = self.currpos.copy()
@@ -250,7 +260,12 @@ class UREnv(gym.Env):
         gripper_action = action[6] * self.action_scale[2]
 
         self._send_gripper_command(gripper_action)
-        self._send_pos_command(self.clip_safety_box(self.nextpos))
+
+        print(f"nextpos before clip: {self.nextpos}")
+
+        nextpos_clip = self.clip_safety_box(self.nextpos)
+        print(f"nextpos_clip: {nextpos_clip}")
+        self._send_pos_command(nextpos_clip)
 
         self.curr_path_length += 1
         dt = time.time() - start_time
@@ -435,8 +450,12 @@ class UREnv(gym.Env):
         return reached
 
     def go_to_reset(self, joint_reset=False):
-        # Ensure no residual speedL command is active before switching to pose reset.
-        self.velocity_stop(acceleration=0.5)
+        # Stop the active motion with the control-mode-correct stop (servoStop for
+        # servol/servoj). The old velocity_stop (speedStop) ran stopl() against the
+        # still-running servo thread from teleop, which tripped the controller's
+        # "another thread is already controlling the robot" error and left rtde_c
+        # in a failed state for the rest of the session.
+        self.stop_motion()
         time.sleep(0.05)
         self._update_currpos()
         self._send_pos_command(self.currpos)
@@ -462,12 +481,12 @@ class UREnv(gym.Env):
                 -self.random_rz_range, self.random_rz_range
             )
             reset_pose[3:] = euler_2_quat(euler_random)
-            self.movel_blocking_move(reset_pose)
+            self.interpolate_move(reset_pose, timeout=self.reset_interpolate_time)
             print("Finish go to the random reset pose:", reset_pose)
 
         else:
             reset_pose = self.resetpos.copy()
-            self.movel_blocking_move(reset_pose)
+            self.interpolate_move(reset_pose, timeout=self.reset_interpolate_time)
             print("Finish go to the reset pose:", reset_pose)
 
 
@@ -568,6 +587,16 @@ class UREnv(gym.Env):
 
     def velocity_stop(self, acceleration: float = 0.5):
         self.session.post(self.url + "speedstop", json={"acceleration": acceleration})
+
+    def stop_motion(self):
+        """Stop the active motion using the server's control-mode-aware stop.
+
+        In servol/servoj mode the live motion is a servo thread that MUST be ended
+        with servoStop; using speedStop (velocity_stop) instead leaves the servo
+        thread running and trips the controller's "another thread is already
+        controlling the robot" error on the next command.
+        """
+        self.session.post(self.url + "stop")
 
     def _send_gripper_command(self, pos: float, mode="binary"):
         if mode == "binary":

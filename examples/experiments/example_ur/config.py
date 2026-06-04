@@ -45,13 +45,18 @@ class EnvConfig(DefaultEnvConfig):
 
     # Conservative placeholders — REPLACE with values from /getpos_euler at your safe workspace pose.
     # TARGET_POSE = np.array([0.40, 0.00, 0.30, np.pi, 0.0, 0.0])
-    TARGET_POSE = np.array([0.964, -0.033, 0.225, -np.pi, 0.0, -np.pi/2])
+    # NOTE on roll: use +np.pi, not -np.pi. clip_safety_box()'s roll wraparound
+    # handling (abs(roll) clipped against [low, high] then sign-restored) assumes the
+    # roll limits are POSITIVE (centered on +pi). With roll=-np.pi the limits become
+    # negative and the clip flips roll to the boundary every step, so servoL keeps
+    # snapping the wrist to the orientation limit. +np.pi is the same physical pose.
+    TARGET_POSE = np.array([0.964, -0.033, 0.225, np.pi, 0.0, -np.pi/2])
 
 
     RESET_POSE = TARGET_POSE + np.array([0.0, 0.0, 0.15, 0, 0, 0])
     REWARD_THRESHOLD = np.array([0.01, 0.01, 0.01, 0.1, 0.1, 0.1])
-    ABS_POSE_LIMIT_LOW = TARGET_POSE - np.array([0.05, 0.05, 0.03, 0.2, 0.2, 0.3])
-    ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.05, 0.05, 0.20, 0.2, 0.2, 0.3])
+    ABS_POSE_LIMIT_LOW = TARGET_POSE - np.array([0.2, 0.2, 0.1, 0.2, 0.2, 0.3])
+    ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.2, 0.2, 0.2, 0.2, 0.2, 0.3])
 
     RANDOM_RESET = True
     RANDOM_XY_RANGE = 0.05
@@ -84,7 +89,9 @@ class TrainConfig(DefaultTrainingConfig):
         env = URExampleEnv(fake_env=fake_env, save_video=save_video, config=EnvConfig())
         env = GripperCloseEnv(env)
         if not fake_env:
-            env = KeyboardIntervention(env)
+            # velocity_teleop=False: keyboard jogs via the pose step path (servoL),
+            # so demo collection uses the same control path as policy execution.
+            env = KeyboardIntervention(env, velocity_teleop=False)
         env = RelativeFrame(env)
         env = Quat2EulerWrapper(env)
         env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)
