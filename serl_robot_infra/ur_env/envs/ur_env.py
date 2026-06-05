@@ -35,7 +35,7 @@ import cv2
 import gymnasium as gym
 import numpy as np
 import requests
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Rotation, Slerp
 
 from franka_env.camera.video_capture import VideoCapture
 from franka_env.utils.rotations import euler_2_quat, quat_2_euler
@@ -370,10 +370,26 @@ class UREnv(gym.Env):
     def interpolate_move(self, goal: np.ndarray, timeout: float):
         if goal.shape == (6,):
             goal = np.concatenate([goal[:3], euler_2_quat(goal[3:])])
-        steps = int(timeout * self.hz)
+        steps = max(int(timeout * self.hz), 1)
         self._update_currpos()
-        path = np.linspace(self.currpos, goal, steps)
-        for p in path:
+        start = self.currpos.copy()
+
+        # Position: straight-line interpolation.
+        pos_path = np.linspace(start[:3], goal[:3], steps)
+
+        # Orientation: SLERP, not component-wise linear interpolation. Linearly
+        # blending two quaternions passes through the antipode whenever start and
+        # goal lie on opposite hemispheres of the double cover (dot < 0). The TCP
+        # quaternion read back from the controller (R.from_rotvec(...).as_quat())
+        # has an arbitrary sign, so this happens unpredictably and makes the wrist
+        # (last joint) suddenly spin ~180/360 deg mid-reset, tripping a protective
+        # stop. Slerp always follows the shortest arc and is sign-invariant.
+        key_rots = Rotation.from_quat(np.stack([start[3:], goal[3:]]))
+        quat_path = Slerp([0.0, 1.0], key_rots)(np.linspace(0.0, 1.0, steps)).as_quat()
+
+        p = start
+        for xyz, quat in zip(pos_path, quat_path):
+            p = np.concatenate([xyz, quat])
             self._send_pos_command(p)
             time.sleep(1 / self.hz)
         self.nextpos = p

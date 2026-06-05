@@ -66,7 +66,7 @@ class EnvConfig(DefaultEnvConfig):
     ACTION_SCALE = (0.005, 0.03, 1.0)
 
     DISPLAY_IMAGE = True
-    MAX_EPISODE_LENGTH = 100
+    MAX_EPISODE_LENGTH = 160
     GRIPPER_SLEEP = 0.6
     JOINT_RESET_PERIOD = 0
 

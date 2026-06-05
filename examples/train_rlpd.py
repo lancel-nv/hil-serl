@@ -40,6 +40,13 @@ flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folde
 flags.DEFINE_integer("seed", 42, "Random seed.")
 flags.DEFINE_boolean("learner", False, "Whether this is a learner.")
 flags.DEFINE_boolean("actor", False, "Whether this is an actor.")
+flags.DEFINE_boolean(
+    "smoke",
+    False,
+    "Smoke/debug mode (like --learner/--actor): load the replay + demo buffers, "
+    "print a sampled batch from each iterator to inspect the stored data, then exit. "
+    "No robot/cameras and no training.",
+)
 flags.DEFINE_string("ip", "localhost", "IP address of the learner.")
 flags.DEFINE_multi_string("demo_path", None, "Path to the demo data.")
 flags.DEFINE_string("checkpoint_path", None, "Path to save checkpoints.")
@@ -50,6 +57,9 @@ flags.DEFINE_boolean("save_video", False, "Save video.")
 flags.DEFINE_boolean(
     "debug", False, "Debug mode."
 )  # debug mode will disable wandb logging
+
+# How often (in learner steps) to print the reward/Q debug line.
+LEARNER_DEBUG_PERIOD = 100
 
 
 devices = jax.local_devices()
@@ -206,6 +216,16 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
 
             obs = next_obs
             if done or truncated:
+                succeed = bool(info.get("succeed", reward))
+                if succeed:
+                    print_green(
+                        f"[actor] rollout finished: SUCCESS (return={running_return})"
+                    )
+                else:
+                    print(
+                        "\033[91m [actor] rollout finished: FAILURE "
+                        f"(return={running_return})\033[00m"
+                    )
                 info["episode"]["intervention_count"] = intervention_count
                 info["episode"]["intervention_steps"] = intervention_steps
                 stats = {"environment": info}  # send stats to the learner to log
@@ -249,11 +269,13 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
     """
     The learner loop, which runs when "--learner" is set to True.
     """
-    start_step = (
-        int(os.path.basename(checkpoints.latest_checkpoint(os.path.abspath(FLAGS.checkpoint_path)))[11:])
-        + 1
+    latest_ckpt = (
+        checkpoints.latest_checkpoint(os.path.abspath(FLAGS.checkpoint_path))
         if FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path)
-        else 0
+        else None
+    )
+    start_step = (
+        int(os.path.basename(latest_ckpt)[11:]) + 1 if latest_ckpt is not None else 0
     )
     step = start_step
 
@@ -339,10 +361,37 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
                 batch,
                 networks_to_update=train_networks_to_update,
             )
+
+        # --- debug: verify reward actually flows into the critic target ---
+        # Network training happens ONLY here (learner); the actor does not train.
+        # SAC critic target is: rewards + discount * masks * min_target_q  (see
+        # SACAgent.critic_loss_fn), so a nonzero `reward_used_in_target` below
+        # confirms reward is being used by the network.
+        if step == start_step or step % LEARNER_DEBUG_PERIOD == 0:
+            r = np.asarray(jax.device_get(batch["rewards"]))
+            m = np.asarray(jax.device_get(batch["masks"]))
+            if step == start_step:
+                obs_shapes = jax.tree_util.tree_map(
+                    lambda x: tuple(x.shape), batch["observations"]
+                )
+                print_green(f"[learner] network INPUT  obs shapes: {obs_shapes}")
+                print_green(f"[learner] network INPUT  actions shape: {tuple(batch['actions'].shape)}")
+            critic_info = update_info.get("critic", {})
+            print_green(
+                f"[learner step {step}] reward(batch): mean={r.mean():.4f} "
+                f"min={r.min():.2f} max={r.max():.2f} nonzero={int((r != 0).sum())}/{r.size} "
+                f"| masks mean={m.mean():.3f} "
+                f"| critic_loss={float(critic_info['critic_loss']):.4f} "
+                f"predicted_q={float(critic_info['predicted_qs']):.3f} "
+                f"target_q={float(critic_info['target_qs']):.3f} "
+                f"reward_used_in_target={float(critic_info['rewards']):.4f}"
+            )
+
         # publish the updated network
         if step > 0 and step % (config.steps_per_update) == 0:
             agent = jax.block_until_ready(agent)
             server.publish_network(agent.state.params)
+            print_green("published network to actor")
 
         if step % config.log_period == 0 and wandb_logger:
             wandb_logger.log(update_info, step=step)
@@ -356,6 +405,8 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
             checkpoints.save_checkpoint(
                 os.path.abspath(FLAGS.checkpoint_path), agent.state, step=step, keep=100
             )
+            print_green("saved checkpoint")
+
 
 
 ##############################################################################
@@ -372,7 +423,7 @@ def main(_):
 
     assert FLAGS.exp_name in CONFIG_MAPPING, "Experiment folder not found."
     env = config.get_environment(
-        fake_env=FLAGS.learner,
+        fake_env=FLAGS.learner or FLAGS.smoke,
         save_video=FLAGS.save_video,
         classifier=True,
     )
@@ -424,17 +475,27 @@ def main(_):
         jax.tree_util.tree_map(jnp.array, agent), replicated_sharding
     )
 
-    if FLAGS.checkpoint_path is not None and os.path.exists(FLAGS.checkpoint_path):
+    if (
+        FLAGS.checkpoint_path is not None
+        and os.path.exists(FLAGS.checkpoint_path)
+        and not FLAGS.smoke
+    ):
         input("Checkpoint path already exists. Press Enter to resume training.")
-        ckpt = checkpoints.restore_checkpoint(
-            os.path.abspath(FLAGS.checkpoint_path),
-            agent.state,
+        latest_ckpt = checkpoints.latest_checkpoint(
+            os.path.abspath(FLAGS.checkpoint_path)
         )
-        agent = agent.replace(state=ckpt)
-        ckpt_number = os.path.basename(
-            checkpoints.latest_checkpoint(os.path.abspath(FLAGS.checkpoint_path))
-        )[11:]
-        print_green(f"Loaded previous checkpoint at step {ckpt_number}.")
+        if latest_ckpt is not None:
+            ckpt = checkpoints.restore_checkpoint(
+                os.path.abspath(FLAGS.checkpoint_path),
+                agent.state,
+            )
+            agent = agent.replace(state=ckpt)
+            ckpt_number = os.path.basename(latest_ckpt)[11:]
+            print_green(f"Loaded previous checkpoint at step {ckpt_number}.")
+        else:
+            print_green(
+                "No checkpoint found in checkpoint path; starting training from scratch."
+            )
 
     def create_replay_buffer_and_wandb_logger():
         replay_buffer = MemoryEfficientReplayBufferDataStore(
@@ -525,8 +586,96 @@ def main(_):
             sampling_rng,
         )
 
+    elif FLAGS.smoke:
+        # Inspect the data stored in the replay (online) and demo buffers, exactly
+        # as the learner would build them, then print a sampled batch from each
+        # iterator so we can verify the stored transitions are correct.
+        replay_buffer = MemoryEfficientReplayBufferDataStore(
+            env.observation_space,
+            env.action_space,
+            capacity=config.replay_buffer_capacity,
+            image_keys=config.image_keys,
+            include_grasp_penalty=include_grasp_penalty,
+        )
+        demo_buffer = MemoryEfficientReplayBufferDataStore(
+            env.observation_space,
+            env.action_space,
+            capacity=config.replay_buffer_capacity,
+            image_keys=config.image_keys,
+            include_grasp_penalty=include_grasp_penalty,
+        )
+
+        # demos -> demo_buffer
+        assert FLAGS.demo_path is not None, "--demo_path is required for --smoke"
+        for path in FLAGS.demo_path:
+            with open(path, "rb") as f:
+                for transition in pkl.load(f):
+                    if "infos" in transition and "grasp_penalty" in transition["infos"]:
+                        transition["grasp_penalty"] = transition["infos"]["grasp_penalty"]
+                    demo_buffer.insert(transition)
+
+        # saved online buffer (if any) -> replay_buffer
+        if FLAGS.checkpoint_path is not None and os.path.exists(
+            os.path.join(FLAGS.checkpoint_path, "buffer")
+        ):
+            for file in glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl")):
+                with open(file, "rb") as f:
+                    for transition in pkl.load(f):
+                        replay_buffer.insert(transition)
+
+        # saved demo buffer (if any) -> demo_buffer
+        if FLAGS.checkpoint_path is not None and os.path.exists(
+            os.path.join(FLAGS.checkpoint_path, "demo_buffer")
+        ):
+            for file in glob.glob(os.path.join(FLAGS.checkpoint_path, "demo_buffer/*.pkl")):
+                with open(file, "rb") as f:
+                    for transition in pkl.load(f):
+                        demo_buffer.insert(transition)
+
+        def describe_buffer(name, buf):
+            print_green(f"==== {name}: {len(buf)} transitions ====")
+            if len(buf) == 0:
+                print("  (empty - nothing to sample)")
+                return
+            # Match the learner's sampling, but unpacked so obs/next_obs are separate
+            # and easy to read.
+            it = buf.get_iterator(
+                sample_args={
+                    "batch_size": min(config.batch_size, len(buf)),
+                    "pack_obs_and_next_obs": False,
+                },
+                device=replicated_sharding,
+            )
+            batch = next(it)
+            obs_shapes = jax.tree_util.tree_map(lambda x: tuple(x.shape), batch["observations"])
+            nobs_shapes = jax.tree_util.tree_map(lambda x: tuple(x.shape), batch["next_observations"])
+            print(f"  batch keys        : {sorted(batch.keys())}")
+            print(f"  observations      : {obs_shapes}")
+            print(f"  next_observations : {nobs_shapes}")
+            print(f"  actions shape     : {tuple(batch['actions'].shape)}")
+            r = np.asarray(jax.device_get(batch["rewards"])).astype(float)
+            m = np.asarray(jax.device_get(batch["masks"])).astype(float)
+            print(
+                f"  rewards           : mean={r.mean():.4f} min={r.min():.2f} "
+                f"max={r.max():.2f} nonzero={int((r != 0).sum())}/{r.size}"
+            )
+            print(f"  masks             : mean={m.mean():.3f}")
+            if "dones" in batch:
+                d = np.asarray(jax.device_get(batch["dones"])).astype(float)
+                print(f"  dones             : sum={int(d.sum())}/{d.size}")
+            if "grasp_penalty" in batch:
+                gp = np.asarray(jax.device_get(batch["grasp_penalty"])).astype(float)
+                print(f"  grasp_penalty     : mean={gp.mean():.4f}")
+            print(f"  sample actions[0] : {np.asarray(jax.device_get(batch['actions']))[0]}")
+            print(f"  sample rewards[:8]: {r.flatten()[:8]}")
+
+        print_green("==== SMOKE: inspecting buffers (no training, no robot) ====")
+        describe_buffer("demo_buffer", demo_buffer)
+        describe_buffer("replay_buffer (online)", replay_buffer)
+        print_green("==== SMOKE done ====")
+
     else:
-        raise NotImplementedError("Must be either a learner or an actor")
+        raise NotImplementedError("Must be either a learner, an actor, or --smoke")
 
 
 if __name__ == "__main__":
